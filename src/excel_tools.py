@@ -19,8 +19,10 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
-def _wb_url(item_id: str) -> str:
+def _wb_url(item_id: str, drive_id: str | None = None) -> str:
     """Base workbook URL for an item."""
+    if drive_id:
+        return f"{GRAPH_BASE}/drives/{drive_id}/items/{item_id}/workbook"
     return f"{GRAPH_BASE}/me/drive/items/{item_id}/workbook"
 
 
@@ -51,17 +53,18 @@ def _request_with_retry(
     return r
 
 
-def get_workbook_info(item_id: str) -> dict:
+def get_workbook_info(item_id: str, drive_id: str | None = None) -> dict:
     """List worksheets and named tables in a workbook.
 
     Args:
         item_id: SharePoint/OneDrive item ID for the Excel file.
+        drive_id: Drive ID for SharePoint site files. If None, uses /me/drive.
 
     Returns:
         Dict with worksheets and tables lists.
     """
     h = _headers()
-    base = _wb_url(item_id)
+    base = _wb_url(item_id, drive_id)
 
     # Fetch worksheets
     r_ws = _request_with_retry("GET", f"{base}/worksheets", headers=h)
@@ -103,6 +106,7 @@ def read_range(
     item_id: str,
     sheet: str | None = None,
     range_addr: str | None = None,
+    drive_id: str | None = None,
 ) -> dict:
     """Read values from a worksheet range.
 
@@ -110,12 +114,13 @@ def read_range(
         item_id: SharePoint/OneDrive item ID.
         sheet: Worksheet name. If None, uses first worksheet.
         range_addr: Excel range like 'A1:L10'. If None, reads used range.
+        drive_id: Drive ID for SharePoint site files. If None, uses /me/drive.
 
     Returns:
         Dict with worksheet name, range address, dimensions, and values.
     """
     h = _headers()
-    base = _wb_url(item_id)
+    base = _wb_url(item_id, drive_id)
 
     # Resolve sheet name if not provided
     if not sheet:
@@ -152,6 +157,7 @@ def write_range(
     sheet: str,
     range_addr: str,
     values: list[list],
+    drive_id: str | None = None,
 ) -> dict:
     """Update cell values in a range.
 
@@ -160,12 +166,13 @@ def write_range(
         sheet: Worksheet name.
         range_addr: Target range address like 'F5' or 'F5:G6'.
         values: 2D list of values matching the range dimensions.
+        drive_id: Drive ID for SharePoint site files. If None, uses /me/drive.
 
     Returns:
         Dict with worksheet, range, status, and updated values.
     """
     h = _headers()
-    base = _wb_url(item_id)
+    base = _wb_url(item_id, drive_id)
 
     sheet_encoded = quote(sheet, safe="")
     addr_encoded = quote(range_addr, safe="")
@@ -188,6 +195,7 @@ def append_rows(
     values: list[list],
     sheet: str | None = None,
     table: str | None = None,
+    drive_id: str | None = None,
 ) -> dict:
     """Append rows to end of used range or to a named table.
 
@@ -196,12 +204,13 @@ def append_rows(
         values: 2D list of rows to append.
         sheet: Worksheet name (required if not using table mode).
         table: Named table to append to (uses table API).
+        drive_id: Drive ID for SharePoint site files. If None, uses /me/drive.
 
     Returns:
         Dict with status, range of new rows, and values.
     """
     h = _headers()
-    base = _wb_url(item_id)
+    base = _wb_url(item_id, drive_id)
 
     if table:
         # Table mode: POST to table rows endpoint

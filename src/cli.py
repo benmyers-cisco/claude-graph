@@ -1033,7 +1033,7 @@ def cmd_docs_site(args):
 def cmd_excel_info(args):
     """List worksheets and tables in an Excel workbook."""
     try:
-        result = get_workbook_info(item_id=args.item_id)
+        result = get_workbook_info(item_id=args.item_id, drive_id=args.drive)
     except Exception as e:
         print(json.dumps({"error": str(e)}))
         return 1
@@ -1049,6 +1049,7 @@ def cmd_excel_read(args):
             item_id=args.item_id,
             sheet=args.sheet,
             range_addr=args.range,
+            drive_id=args.drive,
         )
     except Exception as e:
         print(json.dumps({"error": str(e)}))
@@ -1076,6 +1077,7 @@ def cmd_excel_write(args):
             sheet=args.sheet,
             range_addr=args.range,
             values=values,
+            drive_id=args.drive,
         )
     except Exception as e:
         print(json.dumps({"error": str(e)}))
@@ -1103,6 +1105,7 @@ def cmd_excel_append(args):
             values=values,
             sheet=args.sheet,
             table=args.table,
+            drive_id=args.drive,
         )
     except Exception as e:
         print(json.dumps({"error": str(e)}))
@@ -1541,6 +1544,10 @@ def main():
 
     # excel command group
     excel_parser = subparsers.add_parser("excel", help="Read and write Excel workbooks")
+    excel_parser.add_argument(
+        "--drive", "-d",
+        help="Drive ID for SharePoint site files (default: user's OneDrive)"
+    )
     excel_sub = excel_parser.add_subparsers(dest="excel_command", help="Excel subcommands")
 
     # excel info
