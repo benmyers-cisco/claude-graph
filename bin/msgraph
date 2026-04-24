@@ -1,0 +1,2 @@
+#!/bin/bash
+cd ~/.config/claude-graph && exec ./venv/bin/python -m src.cli "$@"
