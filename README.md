@@ -2,6 +2,10 @@
 
 Microsoft Graph CLI plugin for Claude Code. Gives Claude access to your Outlook calendar, email, SharePoint docs, Excel spreadsheets, conference rooms, and org chart — all through a single `msgraph` command.
 
+## What's New: Excel Read/Write (2026-04-23)
+
+Added `msgraph excel` subcommands that let Claude read and write Excel files stored in SharePoint and OneDrive using the [Microsoft Graph Excel API](https://learn.microsoft.com/en-us/graph/api/resources/excel). This means Claude can now update tracking spreadsheets, append rows to tables, and read cell data — all without downloading files or using openpyxl. The implementation uses raw REST calls against the v1.0 Graph API (no workbook sessions), with retry logic for throttling. A `--drive` flag supports SharePoint site files that live outside the user's personal OneDrive.
+
 ## Commands
 
 | Command | Description |
