@@ -8,12 +8,13 @@ by Claude skills without additional approval.
 Usage:
     python -m src.cli auth [--email EMAIL]
     python -m src.cli calendar [days] [--date YYYY-MM-DD]
-    python -m src.cli create-event <subject> <start> <end> [--body TEXT] [--show-as STATUS] [--location LOC] [--attendees EMAILS]
     python -m src.cli book-rooms [--building BUILDING] [--floor FLOOR]
     python -m src.cli book-room <event-id> <room-email> [--room-name NAME]
     python -m src.cli find-meeting <names...> [--duration MINUTES]
     python -m src.cli room-availability <start> <end> [--building BUILDING] [--floor FLOOR]
     python -m src.cli resolve-person <query>
+    python -m src.cli email search <query> [--max N] [--folder FOLDER]
+    python -m src.cli email read <message-id>
     python -m src.cli stats [days] [--date YYYY-MM-DD] [--work-start HH:MM] [--work-end HH:MM]
     python -m src.cli config [--email EMAIL] [--timezone TZ] [--building CODE] [--floors 1,2] [--favorite-rooms EMAIL,EMAIL]
 """
@@ -30,13 +31,11 @@ from .calendar_tools import (
     create_event,
 )
 from .config import get_config, set_config
+from .email_tools import search_emails, read_email
 from .stats import compute_day_stats, compute_range_stats
 from .room_tools import list_rooms, find_available_rooms, check_room_availability
 from .people_tools import resolve_person, get_attendee_locations, get_org_info, get_user_timezones
 from .meeting_tools import find_meeting_times
-from .docs_tools import search_documents, get_recent_documents, get_site_documents
-from .email_tools import search_emails, get_recent_emails, get_emails_with_person
-from .excel_tools import get_workbook_info, read_range, write_range, append_rows
 from .graph_client import get_graph_client, run_async, get_token, set_token, is_token_expired, get_concurrency_semaphore
 
 
@@ -371,48 +370,6 @@ def cmd_calendar(args):
     }
 
     print(json.dumps(result, indent=2))
-    return 0
-
-
-def cmd_create_event(args):
-    """Create a new calendar event."""
-    prefs = get_config()
-    tz = prefs.get("timezone")
-
-    # Parse attendees
-    attendees = None
-    if args.attendees:
-        attendees = [a.strip() for a in args.attendees.split(",") if a.strip()]
-
-    try:
-        result = create_event(
-            subject=args.subject,
-            start=args.start,
-            end=args.end,
-            body=args.body,
-            show_as=args.show_as or "busy",
-            timezone=tz,
-            is_all_day=args.all_day,
-            location=args.location,
-            attendees=attendees,
-        )
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-
-    # Compact output
-    output = {
-        "status": "created",
-        "id": result.get("id"),
-        "subject": result.get("subject"),
-        "start": result.get("start"),
-        "end": result.get("end"),
-        "show_as": result.get("show_as"),
-    }
-    if attendees:
-        output["attendees"] = attendees
-
-    print(json.dumps(output, indent=2))
     return 0
 
 
@@ -917,80 +874,25 @@ def cmd_stats(args):
 
 
 def cmd_email_search(args):
-    """Search emails using KQL query."""
+    """Search emails matching a query."""
     try:
         results = search_emails(
-            query=args.query,
-            max_results=args.max or 20,
+            args.query,
+            max_results=args.max,
+            folder=args.folder,
         )
     except Exception as e:
         print(json.dumps({"error": str(e)}))
         return 1
 
-    print(json.dumps({"query": args.query, "count": len(results), "messages": results}, indent=2))
+    print(json.dumps({"messages": results, "count": len(results)}, indent=2))
     return 0
 
 
-def cmd_email_recent(args):
-    """Get recent emails."""
+def cmd_email_read(args):
+    """Read the full content of an email message."""
     try:
-        results = get_recent_emails(
-            days=args.days or 3,
-            max_results=args.max or 30,
-            important_only=args.important,
-            unread_only=args.unread,
-        )
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-
-    print(json.dumps({"days": args.days or 3, "count": len(results), "messages": results}, indent=2))
-    return 0
-
-
-def cmd_email_person(args):
-    """Get emails exchanged with a specific person."""
-    # Resolve name to email if needed
-    person_email = args.person
-    if "@" not in person_email:
-        try:
-            resolved = resolve_person(person_email)
-            if resolved.get("resolved_email"):
-                person_email = resolved["resolved_email"]
-            else:
-                print(json.dumps({"error": f"Could not resolve '{args.person}' to an email", "resolve_result": resolved}))
-                return 1
-        except Exception as e:
-            print(json.dumps({"error": f"Could not resolve person: {e}"}))
-            return 1
-
-    try:
-        results = get_emails_with_person(
-            email=person_email,
-            days=args.days or 14,
-            max_results=args.max or 30,
-        )
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-
-    print(json.dumps({
-        "person": person_email,
-        "days": args.days or 14,
-        "count": len(results),
-        "messages": results,
-    }, indent=2))
-    return 0
-
-
-def cmd_docs_search(args):
-    """Search for documents across SharePoint and OneDrive."""
-    try:
-        result = search_documents(
-            query=args.query,
-            max_results=args.max or 20,
-            file_type=args.type,
-        )
+        result = read_email(args.message_id)
     except Exception as e:
         print(json.dumps({"error": str(e)}))
         return 1
@@ -999,113 +901,36 @@ def cmd_docs_search(args):
     return 0
 
 
-def cmd_docs_recent(args):
-    """Get recently modified documents."""
+def cmd_delete_event(args):
+    """Delete a calendar event by ID."""
+    import asyncio
+
+    async def _delete(event_id):
+        client = get_graph_client()
+        await client.me.events.by_event_id(event_id).delete()
+        return {"status": "success", "message": f"Event {event_id} deleted."}
+
     try:
-        result = get_recent_documents(
-            days=args.days or 7,
-            max_results=args.max or 20,
-        )
+        result = asyncio.run(_delete(args.event_id))
     except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
+        result = {"status": "error", "message": str(e)}
 
     print(json.dumps(result, indent=2))
-    return 0
+    return 0 if result.get("status") == "success" else 1
 
 
-def cmd_docs_site(args):
-    """List documents in a SharePoint site."""
+def cmd_create_event(args):
+    """Create a new calendar event."""
     try:
-        result = get_site_documents(
-            site_query=args.site,
-            path=args.path,
-            max_results=args.max or 20,
-        )
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-
-    print(json.dumps(result, indent=2))
-    return 0
-
-
-def cmd_excel_info(args):
-    """List worksheets and tables in an Excel workbook."""
-    try:
-        result = get_workbook_info(item_id=args.item_id, drive_id=args.drive)
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-
-    print(json.dumps(result, indent=2))
-    return 0
-
-
-def cmd_excel_read(args):
-    """Read values from an Excel worksheet."""
-    try:
-        result = read_range(
-            item_id=args.item_id,
-            sheet=args.sheet,
-            range_addr=args.range,
-            drive_id=args.drive,
-        )
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-
-    print(json.dumps(result, indent=2))
-    return 0
-
-
-def cmd_excel_write(args):
-    """Write values to an Excel range."""
-    try:
-        values = json.loads(args.values)
-    except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"Invalid JSON for --values: {e}"}))
-        return 1
-
-    if not isinstance(values, list) or not all(isinstance(row, list) for row in values):
-        print(json.dumps({"error": "--values must be a JSON 2D array, e.g. [[\"a\",\"b\"],[\"c\",\"d\"]]"}))
-        return 1
-
-    try:
-        result = write_range(
-            item_id=args.item_id,
-            sheet=args.sheet,
-            range_addr=args.range,
-            values=values,
-            drive_id=args.drive,
-        )
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-
-    print(json.dumps(result, indent=2))
-    return 0
-
-
-def cmd_excel_append(args):
-    """Append rows to an Excel worksheet or table."""
-    try:
-        values = json.loads(args.values)
-    except json.JSONDecodeError as e:
-        print(json.dumps({"error": f"Invalid JSON for --values: {e}"}))
-        return 1
-
-    if not isinstance(values, list) or not all(isinstance(row, list) for row in values):
-        print(json.dumps({"error": "--values must be a JSON 2D array, e.g. [[\"a\",\"b\"],[\"c\",\"d\"]]"}))
-        return 1
-
-    try:
-        result = append_rows(
-            item_id=args.item_id,
-            values=values,
-            sheet=args.sheet,
-            table=args.table,
-            drive_id=args.drive,
+        result = create_event(
+            subject=args.subject,
+            start=args.start,
+            end=args.end,
+            body=args.body,
+            show_as=args.show_as or "busy",
+            is_all_day=args.all_day,
+            location=args.location,
+            attendees=args.attendees.split(",") if args.attendees else None,
         )
     except Exception as e:
         print(json.dumps({"error": str(e)}))
@@ -1247,46 +1072,6 @@ def main():
     )
     cal_parser.set_defaults(func=cmd_calendar)
 
-    # create-event command
-    create_parser = subparsers.add_parser("create-event", help="Create a calendar event")
-    create_parser.add_argument(
-        "subject",
-        help="Event subject/title"
-    )
-    create_parser.add_argument(
-        "start",
-        help="Start time in ISO format (e.g., 2026-04-21T12:00)"
-    )
-    create_parser.add_argument(
-        "end",
-        help="End time in ISO format (e.g., 2026-04-21T13:00)"
-    )
-    create_parser.add_argument(
-        "--body", "-b",
-        help="Event body/description (plain text)"
-    )
-    create_parser.add_argument(
-        "--show-as", "-s",
-        choices=["busy", "free", "tentative", "oof", "workingElsewhere"],
-        default="busy",
-        help="Show as status (default: busy)"
-    )
-    create_parser.add_argument(
-        "--all-day",
-        action="store_true",
-        default=False,
-        help="Create an all-day event"
-    )
-    create_parser.add_argument(
-        "--location", "-l",
-        help="Event location"
-    )
-    create_parser.add_argument(
-        "--attendees", "-a",
-        help="Comma-separated email addresses to invite"
-    )
-    create_parser.set_defaults(func=cmd_create_event)
-
     # book-rooms command
     book_parser = subparsers.add_parser("book-rooms", help="Find meetings needing rooms")
     book_parser.add_argument(
@@ -1418,205 +1203,81 @@ def main():
     )
     stats_parser.set_defaults(func=cmd_stats)
 
-    # email command group
-    email_parser = subparsers.add_parser("email", help="Search and retrieve emails")
-    email_sub = email_parser.add_subparsers(dest="email_command", help="Email subcommands")
+    # email search command
+    email_search_parser = subparsers.add_parser("email", help="Email operations")
+    email_subparsers = email_search_parser.add_subparsers(dest="email_command", help="Email sub-commands")
 
-    # email search
-    email_search_parser = email_sub.add_parser("search", help="Search emails (KQL)")
-    email_search_parser.add_argument(
+    search_parser = email_subparsers.add_parser("search", help="Search emails")
+    search_parser.add_argument(
         "query",
-        help="KQL search query (e.g., 'from:alice subject:project')"
+        help="KQL search query (e.g., 'from:person subject:weekly', 'webex recording')"
     )
-    email_search_parser.add_argument(
-        "--max", "-n",
+    search_parser.add_argument(
+        "--max", "-m",
         type=int,
-        default=20,
-        help="Maximum results (default: 20)"
+        default=10,
+        help="Maximum results to return (default: 10)"
     )
-    email_search_parser.set_defaults(func=cmd_email_search)
+    search_parser.add_argument(
+        "--folder", "-f",
+        help="Mail folder (inbox, sentitems, drafts, or folder ID)"
+    )
+    search_parser.set_defaults(func=cmd_email_search)
 
-    # email recent
-    email_recent_parser = email_sub.add_parser("recent", help="Get recent emails")
-    email_recent_parser.add_argument(
-        "days",
-        nargs="?",
-        type=int,
-        default=3,
-        help="Days back to look (default: 3)"
+    read_parser = email_subparsers.add_parser("read", help="Read full email content")
+    read_parser.add_argument(
+        "message_id",
+        help="Message ID from a search result"
     )
-    email_recent_parser.add_argument(
-        "--max", "-n",
-        type=int,
-        default=30,
-        help="Maximum results (default: 30)"
+    read_parser.set_defaults(func=cmd_email_read)
+
+    # delete-event command
+    delete_event_parser = subparsers.add_parser("delete-event", help="Delete a calendar event")
+    delete_event_parser.add_argument(
+        "event_id",
+        help="Calendar event ID to delete"
     )
-    email_recent_parser.add_argument(
-        "--important", "-i",
+    delete_event_parser.set_defaults(func=cmd_delete_event)
+
+    # create-event command
+    create_event_parser = subparsers.add_parser("create-event", help="Create a calendar event")
+    create_event_parser.add_argument(
+        "subject",
+        help="Event subject/title"
+    )
+    create_event_parser.add_argument(
+        "start",
+        help="Start time (ISO format, e.g., 2026-08-11T09:00:00)"
+    )
+    create_event_parser.add_argument(
+        "end",
+        help="End time (ISO format, e.g., 2026-08-11T09:30:00)"
+    )
+    create_event_parser.add_argument(
+        "--body", "-b",
+        help="Event body/description (plain text)"
+    )
+    create_event_parser.add_argument(
+        "--show-as",
+        choices=["busy", "free", "tentative", "oof", "workingElsewhere"],
+        default="busy",
+        help="Show as status (default: busy)"
+    )
+    create_event_parser.add_argument(
+        "--all-day",
         action="store_true",
         default=False,
-        help="Only high-importance emails"
+        help="Create as all-day event"
     )
-    email_recent_parser.add_argument(
-        "--unread", "-u",
-        action="store_true",
-        default=False,
-        help="Only unread emails"
+    create_event_parser.add_argument(
+        "--location", "-l",
+        help="Event location"
     )
-    email_recent_parser.set_defaults(func=cmd_email_recent)
-
-    # email person
-    email_person_parser = email_sub.add_parser("person", help="Emails with a specific person")
-    email_person_parser.add_argument(
-        "person",
-        help="Person's name or email address"
+    create_event_parser.add_argument(
+        "--attendees", "-a",
+        help="Comma-separated email addresses to invite"
     )
-    email_person_parser.add_argument(
-        "--days", "-d",
-        type=int,
-        default=14,
-        help="Days back to look (default: 14)"
-    )
-    email_person_parser.add_argument(
-        "--max", "-n",
-        type=int,
-        default=30,
-        help="Maximum results (default: 30)"
-    )
-    email_person_parser.set_defaults(func=cmd_email_person)
-
-    # docs command group
-    docs_parser = subparsers.add_parser("docs", help="Search SharePoint and OneDrive documents")
-    docs_sub = docs_parser.add_subparsers(dest="docs_command", help="Document subcommands")
-
-    # docs search
-    docs_search_parser = docs_sub.add_parser("search", help="Search documents across SharePoint/OneDrive")
-    docs_search_parser.add_argument(
-        "query",
-        help="Search query (e.g., 'entra lite project definition')"
-    )
-    docs_search_parser.add_argument(
-        "--max", "-n",
-        type=int,
-        default=20,
-        help="Maximum results (default: 20)"
-    )
-    docs_search_parser.add_argument(
-        "--type", "-t",
-        help="File type filter (e.g., docx, xlsx, pptx, pdf)"
-    )
-    docs_search_parser.set_defaults(func=cmd_docs_search)
-
-    # docs recent
-    docs_recent_parser = docs_sub.add_parser("recent", help="Recently modified documents")
-    docs_recent_parser.add_argument(
-        "days",
-        nargs="?",
-        type=int,
-        default=7,
-        help="Days back to look (default: 7)"
-    )
-    docs_recent_parser.add_argument(
-        "--max", "-n",
-        type=int,
-        default=20,
-        help="Maximum results (default: 20)"
-    )
-    docs_recent_parser.set_defaults(func=cmd_docs_recent)
-
-    # docs site
-    docs_site_parser = docs_sub.add_parser("site", help="List documents in a SharePoint site")
-    docs_site_parser.add_argument(
-        "site",
-        help="Site name or URL fragment (e.g., 'DuoEngineering', 'IdentityEverywhere')"
-    )
-    docs_site_parser.add_argument(
-        "--path", "-p",
-        help="Path within the document library (e.g., 'Duo & CII/Plans')"
-    )
-    docs_site_parser.add_argument(
-        "--max", "-n",
-        type=int,
-        default=20,
-        help="Maximum results (default: 20)"
-    )
-    docs_site_parser.set_defaults(func=cmd_docs_site)
-
-    # excel command group
-    excel_parser = subparsers.add_parser("excel", help="Read and write Excel workbooks")
-    excel_parser.add_argument(
-        "--drive", "-d",
-        help="Drive ID for SharePoint site files (default: user's OneDrive)"
-    )
-    excel_sub = excel_parser.add_subparsers(dest="excel_command", help="Excel subcommands")
-
-    # excel info
-    excel_info_parser = excel_sub.add_parser("info", help="List worksheets and tables")
-    excel_info_parser.add_argument(
-        "item_id",
-        help="SharePoint/OneDrive item ID for the Excel file"
-    )
-    excel_info_parser.set_defaults(func=cmd_excel_info)
-
-    # excel read
-    excel_read_parser = excel_sub.add_parser("read", help="Read cell values")
-    excel_read_parser.add_argument(
-        "item_id",
-        help="SharePoint/OneDrive item ID for the Excel file"
-    )
-    excel_read_parser.add_argument(
-        "--sheet", "-s",
-        help="Worksheet name (default: first worksheet)"
-    )
-    excel_read_parser.add_argument(
-        "--range", "-r",
-        help="Range address like A1:L10 (default: used range)"
-    )
-    excel_read_parser.set_defaults(func=cmd_excel_read)
-
-    # excel write
-    excel_write_parser = excel_sub.add_parser("write", help="Update cell values")
-    excel_write_parser.add_argument(
-        "item_id",
-        help="SharePoint/OneDrive item ID for the Excel file"
-    )
-    excel_write_parser.add_argument(
-        "--sheet", "-s",
-        required=True,
-        help="Worksheet name"
-    )
-    excel_write_parser.add_argument(
-        "--range", "-r",
-        required=True,
-        help="Target range address like F5 or F5:G6"
-    )
-    excel_write_parser.add_argument(
-        "--values", "-v",
-        required=True,
-        help='JSON 2D array of values, e.g. \'[[\"a\",\"b\"],[\"c\",\"d\"]]\''
-    )
-    excel_write_parser.set_defaults(func=cmd_excel_write)
-
-    # excel append
-    excel_append_parser = excel_sub.add_parser("append", help="Append rows")
-    excel_append_parser.add_argument(
-        "item_id",
-        help="SharePoint/OneDrive item ID for the Excel file"
-    )
-    excel_append_parser.add_argument(
-        "--sheet", "-s",
-        help="Worksheet name (required unless --table is used)"
-    )
-    excel_append_parser.add_argument(
-        "--table", "-t",
-        help="Named table to append to"
-    )
-    excel_append_parser.add_argument(
-        "--values", "-v",
-        required=True,
-        help='JSON 2D array of rows, e.g. \'[[\"col1\",\"col2\"]]\''
-    )
-    excel_append_parser.set_defaults(func=cmd_excel_append)
+    create_event_parser.set_defaults(func=cmd_create_event)
 
     # config command
     config_parser = subparsers.add_parser("config", help="Get or set configuration")
@@ -1648,6 +1309,11 @@ def main():
         parser.print_help()
         return 1
 
+    # Handle nested email subcommand
+    if args.command == "email" and not getattr(args, "email_command", None):
+        email_search_parser.print_help()
+        return 1
+
     # Check for token (skip for auth and config commands — they don't need an existing token)
     if args.command not in ("auth", "config"):
         token = get_token()
@@ -1667,20 +1333,6 @@ def main():
                     "help": "Or get a token from https://developer.microsoft.com/en-us/graph/graph-explorer"
                 }))
                 return 1
-
-    # Handle subcommand dispatch for grouped commands
-    if args.command == "email":
-        if not args.email_command:
-            email_parser.print_help()
-            return 1
-    if args.command == "docs":
-        if not args.docs_command:
-            docs_parser.print_help()
-            return 1
-    if args.command == "excel":
-        if not args.excel_command:
-            excel_parser.print_help()
-            return 1
 
     # For auth/config commands, run directly (no retry logic needed)
     if args.command in ("auth", "config"):
