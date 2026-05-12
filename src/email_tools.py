@@ -1,235 +1,205 @@
-"""Email search and retrieval via Microsoft Graph API."""
+"""Email tools for Microsoft Graph API.
 
-from __future__ import annotations
+Search and read email messages via the Messages API.
+"""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from .graph_client import get_graph_client, run_async, get_concurrency_semaphore
+from msgraph.generated.models.o_data_errors.o_data_error import ODataError
+from msgraph.generated.users.item.messages.messages_request_builder import MessagesRequestBuilder
+
+from .graph_client import get_graph_client, run_async
 
 
 def search_emails(
     query: str,
-    max_results: int = 20,
+    *,
+    max_results: int = 10,
     folder: str | None = None,
-) -> list[dict]:
-    """Search emails using KQL via the Graph API $search parameter.
+    client=None,
+) -> list[dict[str, Any]]:
+    """Search emails matching a query string.
 
-    Args:
-        query: KQL search query (e.g., "from:alice subject:project update").
-        max_results: Maximum number of results to return.
-        folder: Mail folder to search (default: all folders).
-
-    Returns:
-        List of email dicts with id, subject, sender, date, preview, etc.
+    Synchronous wrapper around async_search_emails().
     """
-    return run_async(_async_search_emails(query, max_results, folder))
+    if client is None:
+        client = get_graph_client()
+    return run_async(async_search_emails(
+        query, max_results=max_results, folder=folder, client=client,
+    ))
 
 
-async def _async_search_emails(
+async def async_search_emails(
     query: str,
-    max_results: int = 20,
+    *,
+    max_results: int = 10,
     folder: str | None = None,
-) -> list[dict]:
-    client = get_graph_client()
+    client=None,
+) -> list[dict[str, Any]]:
+    """Search emails matching a query string.
 
-    # Use the messages endpoint with $search (KQL)
-    # Graph Explorer tokens have Mail.Read by default
-    from msgraph.generated.users.item.messages.messages_request_builder import (
-        MessagesRequestBuilder,
-    )
+    Uses the $search query parameter which supports KQL (Keyword Query Language):
+    - from:person@example.com
+    - subject:"weekly update"
+    - "exact phrase"
+    - hasAttachments:true
+    - received>=2024-01-01
 
-    config = MessagesRequestBuilder.MessagesRequestBuilderGetRequestConfiguration(
-        query_parameters=MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
-            search=f'"{query}"',
-            top=max_results,
-            select=[
-                "id", "subject", "from", "toRecipients", "ccRecipients",
-                "receivedDateTime", "bodyPreview", "isRead", "importance",
-                "hasAttachments", "conversationId", "flag",
-            ],
-        )
-    )
+    Args:
+        query: KQL search query string.
+        max_results: Maximum number of results to return (default 10).
+        folder: Optional folder ID or well-known name (inbox, sentitems, etc.).
+        client: Optional GraphServiceClient.
 
-    if folder:
-        result = await client.me.mail_folders.by_mail_folder_id(folder).messages.get(
-            request_configuration=config
-        )
+    Returns:
+        List of message dicts with id, subject, from, receivedDateTime, bodyPreview, hasAttachments.
+    """
+    if client is None:
+        client = get_graph_client()
+
+    # Graph $search requires the KQL expression wrapped in outer quotes.
+    # If the query already contains quotes (e.g., subject:"weekly update"),
+    # pass it through as-is since the user is providing raw KQL.
+    if '"' in query:
+        search_expr = query
     else:
-        result = await client.me.messages.get(request_configuration=config)
-
-    return [_format_message(m) for m in (result.value or [])]
-
-
-def get_recent_emails(
-    days: int = 3,
-    max_results: int = 30,
-    important_only: bool = False,
-    unread_only: bool = False,
-) -> list[dict]:
-    """Get recent emails with optional filters.
-
-    Args:
-        days: Number of days back to look.
-        max_results: Maximum results.
-        important_only: Only return high-importance emails.
-        unread_only: Only return unread emails.
-
-    Returns:
-        List of email dicts.
-    """
-    return run_async(_async_get_recent_emails(days, max_results, important_only, unread_only))
-
-
-async def _async_get_recent_emails(
-    days: int = 3,
-    max_results: int = 30,
-    important_only: bool = False,
-    unread_only: bool = False,
-) -> list[dict]:
-    client = get_graph_client()
-
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    filters = [f"receivedDateTime ge {cutoff}"]
-    if important_only:
-        filters.append("importance eq 'high'")
-    if unread_only:
-        filters.append("isRead eq false")
-
-    from msgraph.generated.users.item.messages.messages_request_builder import (
-        MessagesRequestBuilder,
-    )
+        search_expr = f'"{query}"'
 
     config = MessagesRequestBuilder.MessagesRequestBuilderGetRequestConfiguration(
         query_parameters=MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
-            filter=" and ".join(filters),
+            search=search_expr,
             top=max_results,
-            select=[
-                "id", "subject", "from", "toRecipients", "ccRecipients",
-                "receivedDateTime", "bodyPreview", "isRead", "importance",
-                "hasAttachments", "conversationId", "flag",
-            ],
-            orderby=["receivedDateTime desc"],
+            select=["id", "subject", "from", "receivedDateTime", "bodyPreview", "hasAttachments", "webLink"],
         )
     )
 
-    result = await client.me.messages.get(request_configuration=config)
-    return [_format_message(m) for m in (result.value or [])]
+    try:
+        if folder:
+            result = await client.me.mail_folders.by_mail_folder_id(folder).messages.get(
+                request_configuration=config
+            )
+        else:
+            result = await client.me.messages.get(request_configuration=config)
+    except ODataError as e:
+        raise RuntimeError(f"Graph API error: {e.error.code}: {e.error.message}") from e
+
+    messages = []
+    for msg in (result.value or []):
+        from_addr = None
+        if msg.from_ and msg.from_.email_address:
+            from_addr = {
+                "name": msg.from_.email_address.name,
+                "address": msg.from_.email_address.address,
+            }
+        messages.append({
+            "id": msg.id,
+            "subject": msg.subject,
+            "from": from_addr,
+            "received": msg.received_date_time.isoformat() if msg.received_date_time else None,
+            "body_preview": msg.body_preview,
+            "has_attachments": msg.has_attachments,
+            "web_link": msg.web_link,
+        })
+
+    return messages
 
 
-def get_emails_with_person(
-    email: str,
-    days: int = 14,
-    max_results: int = 30,
-) -> list[dict]:
-    """Get emails exchanged with a specific person.
+def read_email(
+    message_id: str,
+    *,
+    client=None,
+) -> dict[str, Any]:
+    """Read the full content of an email message.
+
+    Synchronous wrapper around async_read_email().
+    """
+    if client is None:
+        client = get_graph_client()
+    return run_async(async_read_email(message_id, client=client))
+
+
+async def async_read_email(
+    message_id: str,
+    *,
+    client=None,
+) -> dict[str, Any]:
+    """Read the full content of an email message by ID.
+
+    Returns the full body (HTML and/or text), all recipients, and metadata.
 
     Args:
-        email: The person's email address.
-        days: Number of days back to look.
-        max_results: Maximum results.
+        message_id: The message ID from a search result.
+        client: Optional GraphServiceClient.
 
     Returns:
-        List of email dicts, newest first.
+        Dict with full message content including body, recipients, attachments list.
     """
-    return run_async(_async_get_emails_with_person(email, days, max_results))
+    if client is None:
+        client = get_graph_client()
 
+    from msgraph.generated.users.item.messages.item.message_item_request_builder import MessageItemRequestBuilder
 
-async def _async_get_emails_with_person(
-    email: str,
-    days: int = 14,
-    max_results: int = 30,
-) -> list[dict]:
-    client = get_graph_client()
-    sem = get_concurrency_semaphore()
-
-    # Search for emails from and to this person in parallel
-    from msgraph.generated.users.item.messages.messages_request_builder import (
-        MessagesRequestBuilder,
+    config = MessageItemRequestBuilder.MessageItemRequestBuilderGetRequestConfiguration(
+        query_parameters=MessageItemRequestBuilder.MessageItemRequestBuilderGetQueryParameters(
+            expand=["attachments"],
+        )
     )
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        msg = await client.me.messages.by_message_id(message_id).get(request_configuration=config)
+    except ODataError as e:
+        raise RuntimeError(f"Graph API error: {e.error.code}: {e.error.message}") from e
 
-    async def _search(q: str):
-        async with sem:
-            config = MessagesRequestBuilder.MessagesRequestBuilderGetRequestConfiguration(
-                query_parameters=MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
-                    search=f'"{q}"',
-                    top=max_results,
-                    select=[
-                        "id", "subject", "from", "toRecipients", "ccRecipients",
-                        "receivedDateTime", "bodyPreview", "isRead", "importance",
-                        "hasAttachments", "conversationId", "flag",
-                    ],
-                )
-            )
-            return await client.me.messages.get(request_configuration=config)
-
-    from_result, to_result = await asyncio.gather(
-        _search(f"from:{email}"),
-        _search(f"to:{email}"),
-    )
-
-    # Merge and deduplicate by message ID
-    seen_ids = set()
-    messages = []
-    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
-
-    for msg in (from_result.value or []) + (to_result.value or []):
-        if msg.id in seen_ids:
-            continue
-        seen_ids.add(msg.id)
-        # Filter by date (search doesn't always respect date filters)
-        if msg.received_date_time and msg.received_date_time < cutoff_dt:
-            continue
-        messages.append(msg)
-
-    # Sort by date descending
-    messages.sort(
-        key=lambda m: m.received_date_time or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
-
-    return [_format_message(m) for m in messages[:max_results]]
-
-
-def _format_message(msg) -> dict:
-    """Convert a Graph SDK Message object to a clean dict."""
-    sender = None
-    if msg.from_:
-        ea = msg.from_.email_address
-        sender = {
-            "name": ea.name if ea else None,
-            "email": ea.address if ea else None,
+    # From
+    from_addr = None
+    if msg.from_ and msg.from_.email_address:
+        from_addr = {
+            "name": msg.from_.email_address.name,
+            "address": msg.from_.email_address.address,
         }
 
-    to = []
-    for r in (msg.to_recipients or []):
-        ea = r.email_address
-        if ea:
-            to.append({"name": ea.name, "email": ea.address})
+    # Recipients
+    def _extract_recipients(recipients):
+        if not recipients:
+            return []
+        return [
+            {
+                "name": r.email_address.name if r.email_address else None,
+                "address": r.email_address.address if r.email_address else None,
+            }
+            for r in recipients
+        ]
 
-    cc = []
-    for r in (msg.cc_recipients or []):
-        ea = r.email_address
-        if ea:
-            cc.append({"name": ea.name, "email": ea.address})
+    # Body
+    body_content = None
+    body_type = None
+    if msg.body:
+        body_content = msg.body.content
+        body_type = msg.body.content_type.value if msg.body.content_type else None
 
-    flag_status = None
-    if msg.flag and msg.flag.flag_status:
-        flag_status = msg.flag.flag_status.value
+    # Attachments (metadata only — not downloading content)
+    attachments = []
+    if msg.has_attachments and msg.attachments:
+        for att in msg.attachments:
+            attachments.append({
+                "id": att.id,
+                "name": att.name,
+                "content_type": att.content_type,
+                "size": att.size,
+            })
 
     return {
         "id": msg.id,
         "subject": msg.subject,
-        "from": sender,
-        "to": to,
-        "cc": cc,
+        "from": from_addr,
+        "to": _extract_recipients(msg.to_recipients),
+        "cc": _extract_recipients(msg.cc_recipients),
         "received": msg.received_date_time.isoformat() if msg.received_date_time else None,
-        "preview": msg.body_preview,
-        "is_read": msg.is_read,
-        "importance": msg.importance.value if msg.importance else None,
+        "sent": msg.sent_date_time.isoformat() if msg.sent_date_time else None,
         "has_attachments": msg.has_attachments,
-        "conversation_id": msg.conversation_id,
-        "flag": flag_status,
+        "attachments": attachments,
+        "body_type": body_type,
+        "body": body_content,
+        "web_link": msg.web_link,
     }

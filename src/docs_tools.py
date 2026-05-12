@@ -184,6 +184,71 @@ def get_site_documents(
     }
 
 
+def resolve_sharepoint_file(
+    site_query: str,
+    file_path: str,
+) -> dict:
+    """Resolve a SharePoint site name + file path to drive_id and item_id.
+
+    Args:
+        site_query: Site name or URL fragment (e.g., 'ZeroTrustProductManagement').
+        file_path: Path to the file within the default document library
+                   (e.g., 'Strategy and Operations/OKRs/file.xlsx').
+
+    Returns:
+        Dict with drive_id, item_id, name, and site info.
+
+    Raises:
+        ValueError: If site or file cannot be found.
+    """
+    h = _headers()
+
+    # Find the site
+    r = _requests_get_with_retry(
+        f"{GRAPH_BASE}/sites",
+        headers=h,
+        params={"search": site_query, "$top": 5},
+    )
+    r.raise_for_status()
+    sites = r.json().get("value", [])
+    if not sites:
+        raise ValueError(f"No site found matching '{site_query}'")
+
+    site = sites[0]
+    site_id = site["id"]
+
+    # Get the default document library drive
+    r2 = _requests_get_with_retry(
+        f"{GRAPH_BASE}/sites/{site_id}/drive",
+        headers=h,
+    )
+    r2.raise_for_status()
+    drive = r2.json()
+    drive_id = drive["id"]
+
+    # Resolve the file by path
+    from urllib.parse import quote
+    encoded_path = quote(file_path, safe="/")
+    r3 = _requests_get_with_retry(
+        f"{GRAPH_BASE}/drives/{drive_id}/root:/{encoded_path}",
+        headers=h,
+        params={"$select": "id,name,webUrl,size,lastModifiedDateTime"},
+    )
+    r3.raise_for_status()
+    item = r3.json()
+
+    return {
+        "drive_id": drive_id,
+        "item_id": item["id"],
+        "name": item.get("name"),
+        "url": item.get("webUrl"),
+        "site": {
+            "name": site.get("displayName"),
+            "id": site_id,
+        },
+    }
+
+
 def _format_search_hit(resource: dict, hit: dict) -> dict:
     """Format a search API hit into a clean dict."""
     # Extract site/library info from the resource path

@@ -20,9 +20,8 @@ Added `msgraph excel` subcommands that let Claude read and write Excel files sto
 | `msgraph resolve-person <query>` | Resolve name to email address |
 | `msgraph org <query>` | Look up manager and direct reports |
 | `msgraph stats [days]` | Compute meeting time statistics |
-| `msgraph email search <query>` | Search emails (KQL) |
-| `msgraph email recent [days]` | Get recent emails |
-| `msgraph email person <name>` | Emails with a specific person |
+| `msgraph email search <query>` | Search emails (KQL: `from:`, `to:`, `subject:`, `isRead:false`, etc.) |
+| `msgraph email read <message-id>` | Read full email content |
 | `msgraph docs search <query>` | Search SharePoint/OneDrive documents |
 | `msgraph docs recent [days]` | Recently modified documents |
 | `msgraph docs site <site-name>` | List documents in a SharePoint site |

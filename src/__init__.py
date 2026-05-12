@@ -39,16 +39,7 @@ from .meeting_tools import (
     async_find_meeting_times,
     async_check_participant_availability,
 )
-from .docs_tools import (
-    search_documents,
-    get_recent_documents,
-    get_site_documents,
-)
-from .email_tools import (
-    search_emails,
-    get_recent_emails,
-    get_emails_with_person,
-)
+from .email_tools import search_emails, read_email, async_search_emails, async_read_email
 from .auth import authenticate
 from .config import get_config, set_config, is_configured
 
@@ -86,12 +77,10 @@ __all__ = [
     "async_resolve_person",
     "async_find_meeting_times",
     "async_check_participant_availability",
-    "search_documents",
-    "get_recent_documents",
-    "get_site_documents",
     "search_emails",
-    "get_recent_emails",
-    "get_emails_with_person",
+    "read_email",
+    "async_search_emails",
+    "async_read_email",
     "authenticate",
     "get_config",
     "set_config",
