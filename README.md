@@ -2,33 +2,54 @@
 
 Microsoft Graph CLI plugin for Claude Code. Gives Claude access to your Outlook calendar, email, SharePoint docs, Excel spreadsheets, conference rooms, and org chart — all through a single `msgraph` command.
 
-## What's New: Excel Read/Write (2026-04-23)
-
-Added `msgraph excel` subcommands that let Claude read and write Excel files stored in SharePoint and OneDrive using the [Microsoft Graph Excel API](https://learn.microsoft.com/en-us/graph/api/resources/excel). This means Claude can now update tracking spreadsheets, append rows to tables, and read cell data — all without downloading files or using openpyxl. The implementation uses raw REST calls against the v1.0 Graph API (no workbook sessions), with retry logic for throttling. A `--drive` flag supports SharePoint site files that live outside the user's personal OneDrive.
-
 ## Commands
+
+### Calendar & Meetings
 
 | Command | Description |
 |---------|-------------|
 | `msgraph auth` | Authenticate via Graph Explorer (Playwright-automated SSO) |
 | `msgraph calendar [days]` | Show calendar events |
-| `msgraph create-event <subject> <start> <end>` | Create a calendar event |
 | `msgraph find-meeting <names...>` | Find available meeting times |
 | `msgraph book-rooms` | Find meetings needing rooms and show availability |
 | `msgraph book-room <event-id> <room-email>` | Book a room for an event |
 | `msgraph room-availability <start> [end]` | Check room availability |
-| `msgraph resolve-person <query>` | Resolve name to email address |
-| `msgraph org <query>` | Look up manager and direct reports |
 | `msgraph stats [days]` | Compute meeting time statistics |
+
+### Email
+
+| Command | Description |
+|---------|-------------|
 | `msgraph email search <query>` | Search emails (KQL: `from:`, `to:`, `subject:`, `isRead:false`, etc.) |
-| `msgraph email read <message-id>` | Read full email content |
-| `msgraph docs search <query>` | Search SharePoint/OneDrive documents |
-| `msgraph docs recent [days]` | Recently modified documents |
-| `msgraph docs site <site-name>` | List documents in a SharePoint site |
+| `msgraph email read <message-id>` | Read full email content (HTML body, attachments) |
+
+### SharePoint & OneDrive
+
+| Command | Description |
+|---------|-------------|
+| `msgraph sharepoint-search <query>` | Search SharePoint/OneDrive for files |
+| `msgraph sharepoint-recent [days]` | Recently modified documents |
+| `msgraph sharepoint-site <site-name>` | List documents in a SharePoint site |
+| `msgraph sharepoint-read <item-id>` | Read a SharePoint file (Excel, Word, PowerPoint, PDF, text) |
+| `msgraph sharepoint-download <item-id>` | Download a SharePoint file to local disk |
+| `msgraph sharepoint-upload <item-id>` | Upload a file to replace an existing SharePoint file |
+| `msgraph sharepoint-create <path>` | Create a new file in OneDrive/SharePoint |
+
+### Excel (via Graph API)
+
+| Command | Description |
+|---------|-------------|
 | `msgraph excel info <item-id>` | List worksheets and tables in a workbook |
 | `msgraph excel read <item-id>` | Read cell values from a worksheet |
 | `msgraph excel write <item-id>` | Update cell values in a range |
 | `msgraph excel append <item-id>` | Append rows to a worksheet or table |
+
+### People & Config
+
+| Command | Description |
+|---------|-------------|
+| `msgraph resolve-person <query>` | Resolve name to email address |
+| `msgraph org <query>` | Look up manager and direct reports |
 | `msgraph config` | Get or set user preferences |
 
 ## Setup
@@ -79,14 +100,14 @@ Add to your `.claude/settings.json`:
 
 ## Excel Commands
 
-The `excel` subcommands read and write Excel files stored in SharePoint or OneDrive.
+The `excel` subcommands read and write Excel files stored in SharePoint or OneDrive using the [Microsoft Graph Excel API](https://learn.microsoft.com/en-us/graph/api/resources/excel) — no file downloads or openpyxl needed.
 
 ### File discovery
 
-Find a spreadsheet's item ID using doc search:
+Find a spreadsheet's item ID using SharePoint search:
 
 ```bash
-msgraph docs search "My Tracking Sheet" --type xlsx
+msgraph sharepoint-search "My Tracking Sheet"
 ```
 
 ### Reading data

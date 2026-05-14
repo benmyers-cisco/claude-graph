@@ -4,10 +4,15 @@ Token is resolved in order: persisted file → GRAPH_ACCESS_TOKEN env var.
 """
 
 import asyncio
+import logging
 import os
+import time
 from pathlib import Path
+import requests
 from azure.core.credentials import AccessToken, TokenCredential
 from msgraph import GraphServiceClient
+
+logger = logging.getLogger(__name__)
 
 TOKEN_ENV_VAR = "GRAPH_ACCESS_TOKEN"
 TOKEN_FILE = Path.home() / ".config" / "claude-graph" / "token"
@@ -71,14 +76,14 @@ def set_token(token: str) -> None:
         TOKEN_FILE.write_text(token + "\n")
         TOKEN_FILE.chmod(0o600)
     except OSError:
-        pass
+        logger.warning("Failed to persist token to %s", TOKEN_FILE, exc_info=True)
 
 
 def is_token_expired(token: str = None) -> bool:
     """Check if a JWT token is expired by decoding the payload.
 
     Uses a 60-second buffer to catch tokens that are about to expire.
-    Returns False if the token can't be decoded (let the API call determine validity).
+    Returns True if the token can't be decoded (triggers automatic re-auth).
     """
     import base64
     import json
@@ -92,7 +97,7 @@ def is_token_expired(token: str = None) -> bool:
     try:
         parts = token.split(".")
         if len(parts) != 3:
-            return False
+            return True
 
         # Decode base64url payload
         payload = parts[1]
@@ -102,11 +107,11 @@ def is_token_expired(token: str = None) -> bool:
 
         exp = claims.get("exp")
         if exp is None:
-            return False
+            return True
 
         return datetime.now(timezone.utc).timestamp() > (exp - 60)
     except Exception:
-        return False
+        return True
 
 
 def get_graph_client(token: str = None) -> GraphServiceClient:
@@ -168,3 +173,80 @@ def verify_token(client: GraphServiceClient = None) -> bool:
     except ValueError as e:
         print(str(e))
         return False
+
+
+def get_auth_headers(token: str | None = None) -> dict[str, str]:
+    """Get authorization headers for direct REST API calls."""
+    if token is None:
+        token = get_token()
+    if not token:
+        raise ValueError("No access token available")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _retry_on_transient(
+    request_fn,
+    max_retries: int = 3,
+    retryable_statuses: tuple[int, ...] = (429, 503, 504),
+) -> requests.Response:
+    """Retry a request function on transient HTTP errors, respecting Retry-After."""
+    for attempt in range(max_retries + 1):
+        r = request_fn()
+        if r.status_code not in retryable_statuses or attempt == max_retries:
+            return r
+        retry_after = r.headers.get("Retry-After")
+        if retry_after:
+            try:
+                wait = int(retry_after)
+            except ValueError:
+                wait = 2 ** attempt
+        else:
+            wait = 2 ** attempt
+        time.sleep(min(wait, 30))
+    return r  # unreachable, but satisfies type checkers
+
+
+DEFAULT_TIMEOUT = (10, 60)  # (connect, read) seconds
+
+
+def requests_get_with_retry(
+    url: str,
+    headers: dict[str, str],
+    params: dict | None = None,
+    max_retries: int = 3,
+    timeout: tuple[int, int] = DEFAULT_TIMEOUT,
+) -> requests.Response:
+    """HTTP GET with retry on 429/503/504, respecting Retry-After header."""
+    return _retry_on_transient(
+        lambda: requests.get(url, headers=headers, params=params, timeout=timeout),
+        max_retries=max_retries,
+    )
+
+
+def requests_post_with_retry(
+    url: str,
+    headers: dict[str, str],
+    json: dict | None = None,
+    max_retries: int = 3,
+    timeout: tuple[int, int] = DEFAULT_TIMEOUT,
+) -> requests.Response:
+    """HTTP POST with retry on 429 only, respecting Retry-After header."""
+    return _retry_on_transient(
+        lambda: requests.post(url, headers=headers, json=json, timeout=timeout),
+        max_retries=max_retries,
+        retryable_statuses=(429,),
+    )
+
+
+def requests_put_with_retry(
+    url: str,
+    headers: dict[str, str],
+    data: bytes | None = None,
+    max_retries: int = 3,
+    timeout: tuple[int, int] = DEFAULT_TIMEOUT,
+) -> requests.Response:
+    """HTTP PUT with retry on 429/503/504, respecting Retry-After header."""
+    return _retry_on_transient(
+        lambda: requests.put(url, headers=headers, data=data, timeout=timeout),
+        max_retries=max_retries,
+    )

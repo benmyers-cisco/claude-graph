@@ -59,12 +59,9 @@ async def async_search_emails(
         client = get_graph_client()
 
     # Graph $search requires the KQL expression wrapped in outer quotes.
-    # If the query already contains quotes (e.g., subject:"weekly update"),
-    # pass it through as-is since the user is providing raw KQL.
-    if '"' in query:
-        search_expr = query
-    else:
-        search_expr = f'"{query}"'
+    # Escape any internal quotes/backslashes so the expression stays valid.
+    escaped = query.replace("\\", "\\\\").replace('"', '\\"')
+    search_expr = f'"{escaped}"'
 
     config = MessagesRequestBuilder.MessagesRequestBuilderGetRequestConfiguration(
         query_parameters=MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(

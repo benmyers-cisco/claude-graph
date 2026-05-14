@@ -17,6 +17,12 @@ Usage:
     python -m src.cli email read <message-id>
     python -m src.cli stats [days] [--date YYYY-MM-DD] [--work-start HH:MM] [--work-end HH:MM]
     python -m src.cli config [--email EMAIL] [--timezone TZ] [--building CODE] [--floors 1,2] [--favorite-rooms EMAIL,EMAIL]
+    python -m src.cli sharepoint-search <query> [--type TYPE] [--max N]
+    python -m src.cli sharepoint-read <url> [--sheet SHEET] [--range RANGE] [--list-sheets]
+    python -m src.cli sharepoint-read --drive-id ID --item-id ID [--sheet SHEET] [--range RANGE]
+    python -m src.cli sharepoint-download <url> [--output PATH]
+    python -m src.cli sharepoint-upload <url> --input PATH [--etag TAG] [--force]
+    python -m src.cli sharepoint-create --input PATH [--folder FOLDER] [--filename NAME] [--drive-id ID]
 """
 
 import argparse
@@ -28,7 +34,6 @@ from zoneinfo import ZoneInfo
 
 from .calendar_tools import (
     get_events_in_range, get_local_timezone, windows_tz_to_iana, get_timezone_abbr,
-    create_event,
 )
 from .config import get_config, set_config
 from .email_tools import search_emails, read_email
@@ -901,45 +906,6 @@ def cmd_email_read(args):
     return 0
 
 
-def cmd_delete_event(args):
-    """Delete a calendar event by ID."""
-    import asyncio
-
-    async def _delete(event_id):
-        client = get_graph_client()
-        await client.me.events.by_event_id(event_id).delete()
-        return {"status": "success", "message": f"Event {event_id} deleted."}
-
-    try:
-        result = asyncio.run(_delete(args.event_id))
-    except Exception as e:
-        result = {"status": "error", "message": str(e)}
-
-    print(json.dumps(result, indent=2))
-    return 0 if result.get("status") == "success" else 1
-
-
-def cmd_create_event(args):
-    """Create a new calendar event."""
-    try:
-        result = create_event(
-            subject=args.subject,
-            start=args.start,
-            end=args.end,
-            body=args.body,
-            show_as=args.show_as or "busy",
-            is_all_day=args.all_day,
-            location=args.location,
-            attendees=args.attendees.split(",") if args.attendees else None,
-        )
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-
-    print(json.dumps(result, indent=2))
-    return 0
-
-
 def cmd_config(args):
     """Get or set user configuration."""
     updates = {}
@@ -994,6 +960,227 @@ def cmd_auth(args):
 
     print(json.dumps(result, indent=2))
     return 0 if result.get("status") == "success" else 1
+
+
+def cmd_sharepoint_search(args):
+    """Search SharePoint for files by keyword."""
+    from .sharepoint_tools import search_files
+
+    try:
+        results = search_files(
+            query=args.query,
+            file_type=args.type,
+            max_results=args.max,
+        )
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+
+    print(json.dumps({"query": args.query, "results": results}, indent=2))
+    return 0
+
+
+def cmd_sharepoint_recent(args):
+    """Get recently modified documents."""
+    from .sharepoint_tools import get_recent_documents
+
+    try:
+        results = get_recent_documents(
+            days=args.days,
+            max_results=args.max,
+        )
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+
+    print(json.dumps({"days": args.days, "count": len(results), "documents": results}, indent=2))
+    return 0
+
+
+def cmd_sharepoint_site(args):
+    """List documents in a SharePoint site."""
+    from .sharepoint_tools import get_site_documents
+
+    try:
+        results = get_site_documents(
+            args.site,
+            path=args.path,
+            max_results=args.max,
+        )
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+
+    print(json.dumps(results, indent=2))
+    return 0
+
+
+def cmd_sharepoint_read(args):
+    """Read a SharePoint file, auto-detecting type."""
+    from .sharepoint_tools import read_file, read_file_by_ref, DriveItemRef
+
+    # Validate: require either a URL, or both --drive-id and --item-id
+    has_ids = args.drive_id and args.item_id
+    has_url = args.url is not None
+    # Check for partial IDs first (more specific error)
+    if (args.drive_id or args.item_id) and not has_ids:
+        print(json.dumps({
+            "error": "Both --drive-id and --item-id are required together."
+        }))
+        return 1
+    # Then check for no args at all
+    if not has_ids and not has_url:
+        print(json.dumps({
+            "error": "Provide either a SharePoint URL or both --drive-id and --item-id."
+        }))
+        return 1
+
+    try:
+        if has_ids:
+            from .sharepoint_tools import resolve_drive_item_by_ids
+            ref = resolve_drive_item_by_ids(args.drive_id, args.item_id)
+            result = read_file_by_ref(
+                ref,
+                sheet=args.sheet,
+                cell_range=args.range,
+                list_sheets=args.list_sheets,
+            )
+        else:
+            result = read_file(
+                url=args.url,
+                sheet=args.sheet,
+                cell_range=args.range,
+                list_sheets=args.list_sheets,
+            )
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+
+    if result.get("temp_path"):
+        result["instructions"] = (
+            f"Read the file at {result['temp_path']} now. "
+            "It will be auto-purged after 4 hours."
+        )
+
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_sharepoint_download(args):
+    """Download a SharePoint file to disk."""
+    from .sharepoint_tools import download_file
+
+    has_ids = args.drive_id and args.item_id
+    has_url = args.url is not None
+    if (args.drive_id or args.item_id) and not has_ids:
+        print(json.dumps({"error": "Both --drive-id and --item-id are required together."}))
+        return 1
+    if not has_ids and not has_url:
+        print(json.dumps({"error": "Provide either a SharePoint URL or both --drive-id and --item-id."}))
+        return 1
+
+    try:
+        result = download_file(
+            url=args.url,
+            output_path=args.output,
+            drive_id=args.drive_id,
+            item_id=args.item_id,
+        )
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_sharepoint_upload(args):
+    """Upload a file to replace an existing SharePoint file."""
+    from pathlib import Path
+    from .sharepoint_tools import (
+        upload_file, resolve_drive_item, resolve_drive_item_by_ids,
+        UploadConflictError, FileLockError,
+    )
+
+    try:
+        # Validate arguments
+        if not args.url and not (args.drive_id and args.item_id):
+            print(json.dumps({"error": "Provide either a URL or both --drive-id and --item-id"}))
+            return 1
+        if not args.url and bool(args.drive_id) != bool(args.item_id):
+            missing = "--item-id" if args.drive_id else "--drive-id"
+            print(json.dumps({"error": f"Both --drive-id and --item-id are required (missing {missing})"}))
+            return 1
+
+        # Resolve target
+        if args.url:
+            ref = resolve_drive_item(args.url)
+        else:
+            ref = resolve_drive_item_by_ids(args.drive_id, args.item_id)
+
+        # Read local file
+        content = Path(args.input).read_bytes()
+        local_filename = Path(args.input).name
+
+        result = upload_file(
+            ref, content, local_filename,
+            etag=args.etag, force=args.force,
+        )
+    except UploadConflictError as e:
+        print(json.dumps({
+            "error": "etag_conflict",
+            "message": str(e),
+            "current_etag": e.current_etag,
+            "last_modified": e.last_modified,
+            "last_modified_by": e.last_modified_by,
+        }))
+        return 1
+    except FileLockError as e:
+        print(json.dumps({
+            "error": "file_locked",
+            "message": str(e),
+            "retry_count": e.retry_count,
+        }))
+        return 1
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_sharepoint_create(args):
+    """Create a new file in OneDrive/SharePoint."""
+    from pathlib import Path
+    from .sharepoint_tools import upload_new_file, DestinationFileExistsError
+
+    try:
+        content = Path(args.input).read_bytes()
+        filename = args.filename or Path(args.input).name
+
+        result = upload_new_file(
+            folder_path=args.folder or "",
+            filename=filename,
+            content=content,
+            drive_id=args.drive_id,
+            force=args.force,
+        )
+    except DestinationFileExistsError as e:
+        print(json.dumps({
+            "error": "file_exists",
+            "message": str(e),
+            "existing_name": e.existing_name,
+            "existing_web_url": e.existing_web_url,
+            "existing_last_modified": e.existing_last_modified,
+        }))
+        return 1
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+
+    print(json.dumps(result, indent=2))
+    return 0
 
 
 def _is_token_error(output: str) -> bool:
@@ -1203,81 +1390,33 @@ def main():
     )
     stats_parser.set_defaults(func=cmd_stats)
 
-    # email search command
-    email_search_parser = subparsers.add_parser("email", help="Email operations")
-    email_subparsers = email_search_parser.add_subparsers(dest="email_command", help="Email sub-commands")
+    # email command (with search/read subcommands)
+    email_parser = subparsers.add_parser("email", help="Email operations")
+    email_subparsers = email_parser.add_subparsers(dest="email_command", help="Email sub-commands")
 
-    search_parser = email_subparsers.add_parser("search", help="Search emails")
-    search_parser.add_argument(
+    email_search_parser = email_subparsers.add_parser("search", help="Search emails")
+    email_search_parser.add_argument(
         "query",
         help="KQL search query (e.g., 'from:person subject:weekly', 'webex recording')"
     )
-    search_parser.add_argument(
+    email_search_parser.add_argument(
         "--max", "-m",
         type=int,
         default=10,
         help="Maximum results to return (default: 10)"
     )
-    search_parser.add_argument(
+    email_search_parser.add_argument(
         "--folder", "-f",
         help="Mail folder (inbox, sentitems, drafts, or folder ID)"
     )
-    search_parser.set_defaults(func=cmd_email_search)
+    email_search_parser.set_defaults(func=cmd_email_search)
 
-    read_parser = email_subparsers.add_parser("read", help="Read full email content")
-    read_parser.add_argument(
+    email_read_parser = email_subparsers.add_parser("read", help="Read full email content")
+    email_read_parser.add_argument(
         "message_id",
         help="Message ID from a search result"
     )
-    read_parser.set_defaults(func=cmd_email_read)
-
-    # delete-event command
-    delete_event_parser = subparsers.add_parser("delete-event", help="Delete a calendar event")
-    delete_event_parser.add_argument(
-        "event_id",
-        help="Calendar event ID to delete"
-    )
-    delete_event_parser.set_defaults(func=cmd_delete_event)
-
-    # create-event command
-    create_event_parser = subparsers.add_parser("create-event", help="Create a calendar event")
-    create_event_parser.add_argument(
-        "subject",
-        help="Event subject/title"
-    )
-    create_event_parser.add_argument(
-        "start",
-        help="Start time (ISO format, e.g., 2026-08-11T09:00:00)"
-    )
-    create_event_parser.add_argument(
-        "end",
-        help="End time (ISO format, e.g., 2026-08-11T09:30:00)"
-    )
-    create_event_parser.add_argument(
-        "--body", "-b",
-        help="Event body/description (plain text)"
-    )
-    create_event_parser.add_argument(
-        "--show-as",
-        choices=["busy", "free", "tentative", "oof", "workingElsewhere"],
-        default="busy",
-        help="Show as status (default: busy)"
-    )
-    create_event_parser.add_argument(
-        "--all-day",
-        action="store_true",
-        default=False,
-        help="Create as all-day event"
-    )
-    create_event_parser.add_argument(
-        "--location", "-l",
-        help="Event location"
-    )
-    create_event_parser.add_argument(
-        "--attendees", "-a",
-        help="Comma-separated email addresses to invite"
-    )
-    create_event_parser.set_defaults(func=cmd_create_event)
+    email_read_parser.set_defaults(func=cmd_email_read)
 
     # config command
     config_parser = subparsers.add_parser("config", help="Get or set configuration")
@@ -1303,6 +1442,140 @@ def main():
     )
     config_parser.set_defaults(func=cmd_config)
 
+    # sharepoint-search command
+    sp_search_parser = subparsers.add_parser(
+        "sharepoint-search", help="Search SharePoint for files"
+    )
+    sp_search_parser.add_argument("query", help="Search keywords")
+    sp_search_parser.add_argument(
+        "--type", "-t",
+        choices=["excel", "word", "powerpoint", "pdf", "text"],
+        help="Filter by file type"
+    )
+    sp_search_parser.add_argument(
+        "--max", "-n", type=int, default=10,
+        help="Maximum results to return (default: 10)"
+    )
+    sp_search_parser.set_defaults(func=cmd_sharepoint_search)
+
+    # sharepoint-recent command
+    sp_recent_parser = subparsers.add_parser(
+        "sharepoint-recent", help="Get recently modified documents"
+    )
+    sp_recent_parser.add_argument(
+        "--days", "-d", type=int, default=7,
+        help="Number of days back to look (default: 7)"
+    )
+    sp_recent_parser.add_argument(
+        "--max", "-m", type=int, default=20,
+        help="Maximum results to return (default: 20)"
+    )
+    sp_recent_parser.set_defaults(func=cmd_sharepoint_recent)
+
+    # sharepoint-site command
+    sp_site_parser = subparsers.add_parser(
+        "sharepoint-site", help="List documents in a SharePoint site"
+    )
+    sp_site_parser.add_argument(
+        "site", help="Site name or URL fragment (e.g., 'IdentityEverywhere', 'Oort_internal')"
+    )
+    sp_site_parser.add_argument(
+        "--path", "-p", help="Path within the document library"
+    )
+    sp_site_parser.add_argument(
+        "--max", "-m", type=int, default=20,
+        help="Maximum results to return (default: 20)"
+    )
+    sp_site_parser.set_defaults(func=cmd_sharepoint_site)
+
+    # sharepoint-read command
+    sp_read_parser = subparsers.add_parser(
+        "sharepoint-read", help="Read a SharePoint file"
+    )
+    sp_read_parser.add_argument(
+        "url", nargs="?", default=None,
+        help="SharePoint sharing URL (or use --drive-id + --item-id)"
+    )
+    sp_read_parser.add_argument(
+        "--drive-id", help="Drive ID (from search results, use instead of URL)"
+    )
+    sp_read_parser.add_argument(
+        "--item-id", help="Item ID (from search results, use instead of URL)"
+    )
+    sp_read_parser.add_argument(
+        "--name", help="File name (for display, used with --drive-id)"
+    )
+    sp_read_parser.add_argument(
+        "--sheet", "-s", help="Excel worksheet name (default: first sheet)"
+    )
+    sp_read_parser.add_argument(
+        "--range", "-r", help="Excel cell range (e.g., A1:D10)"
+    )
+    sp_read_parser.add_argument(
+        "--list-sheets", action="store_true",
+        help="List Excel worksheet names instead of reading data"
+    )
+    sp_read_parser.set_defaults(func=cmd_sharepoint_read)
+
+    # sharepoint-download command
+    sp_dl_parser = subparsers.add_parser(
+        "sharepoint-download", help="Download a SharePoint file"
+    )
+    sp_dl_parser.add_argument("url", nargs="?", default=None, help="SharePoint sharing URL")
+    sp_dl_parser.add_argument(
+        "--output", "-o", help="Output file path (default: original filename in CWD)"
+    )
+    sp_dl_parser.add_argument("--drive-id", help="Drive ID (from search results)")
+    sp_dl_parser.add_argument("--item-id", help="Item ID (from search results)")
+    sp_dl_parser.set_defaults(func=cmd_sharepoint_download)
+
+    # sharepoint-upload command
+    sp_upload_parser = subparsers.add_parser(
+        "sharepoint-upload", help="Upload a file to replace an existing SharePoint file"
+    )
+    sp_upload_parser.add_argument(
+        "url", nargs="?", default=None,
+        help="SharePoint sharing URL (or use --drive-id + --item-id)"
+    )
+    sp_upload_parser.add_argument("--drive-id", help="Drive ID")
+    sp_upload_parser.add_argument("--item-id", help="Item ID")
+    sp_upload_parser.add_argument(
+        "--input", "-i", required=True,
+        help="Path to local file to upload"
+    )
+    sp_upload_parser.add_argument("--etag", help="eTag for concurrency check")
+    sp_upload_parser.add_argument(
+        "--force", action="store_true", default=False,
+        help="Skip size sanity check"
+    )
+    sp_upload_parser.set_defaults(func=cmd_sharepoint_upload)
+
+    # sharepoint-create command
+    sp_create_parser = subparsers.add_parser(
+        "sharepoint-create", help="Create a new file in OneDrive/SharePoint"
+    )
+    sp_create_parser.add_argument(
+        "--input", "-i", required=True,
+        help="Path to local file to upload"
+    )
+    sp_create_parser.add_argument(
+        "--folder", "-f", default="",
+        help="Destination folder path relative to drive root (default: root)"
+    )
+    sp_create_parser.add_argument(
+        "--filename",
+        help="Filename in OneDrive (default: same as local filename)"
+    )
+    sp_create_parser.add_argument(
+        "--drive-id",
+        help="Target drive ID (default: user's OneDrive)"
+    )
+    sp_create_parser.add_argument(
+        "--force", action="store_true", default=False,
+        help="Overwrite if a file with the same name already exists"
+    )
+    sp_create_parser.set_defaults(func=cmd_sharepoint_create)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1311,7 +1584,7 @@ def main():
 
     # Handle nested email subcommand
     if args.command == "email" and not getattr(args, "email_command", None):
-        email_search_parser.print_help()
+        email_parser.print_help()
         return 1
 
     # Check for token (skip for auth and config commands — they don't need an existing token)
