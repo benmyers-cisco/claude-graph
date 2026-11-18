@@ -7,7 +7,7 @@ by Claude skills without additional approval.
 
 Usage:
     python -m src.cli auth [--email EMAIL]
-    python -m src.cli calendar [days] [--date YYYY-MM-DD]
+    python -m src.cli calendar [days] [--date YYYY-MM-DD] [--table | --bullets | --brief] [--remaining]
     python -m src.cli book-rooms [--building BUILDING] [--floor FLOOR]
     python -m src.cli book-room <event-id> <room-email> [--room-name NAME]
     python -m src.cli find-meeting <names...> [--duration MINUTES]
@@ -259,6 +259,38 @@ def cmd_calendar(args):
         contact = get_primary_contact(event.get("attendees", []), current_user_email)
         if contact:
             primary_contacts[ev_idx] = contact
+
+    # Plain-text modes: skip the timezone/recurrence enrichment below (extra Graph calls the
+    # table never shows) and print the shared rendering instead of the 400 KB JSON.
+    if args.brief:
+        # Flattened, one line per event: ~14 days fits in a single tool result (the full JSON
+        # is ~400 KB because of event bodies). Keeps attendees and RSVP status, which is what
+        # cross-referencing people against meetings needs.
+        brief = [
+            {
+                "date": e["start"]["date"],
+                "start": e["start"]["date_time"][11:16],
+                "end": e["end"]["date_time"][11:16],
+                "subject": (e.get("subject") or "").strip(),
+                "response_status": e.get("response_status"),
+                "is_all_day": e.get("is_all_day"),
+                "organizer": (e.get("organizer") or {}).get("name"),
+                "attendees_formatted": e.get("attendees_formatted"),
+            }
+            for e in events_data
+        ]
+        print(json.dumps({"timezone": str(local_tz), "events": brief}, separators=(",", ":")).replace('},{', '},\n{'))
+        return 0
+
+    if args.table or args.bullets:
+        from .calendar_table import render_bullets, render_tables
+
+        if args.bullets:
+            print(render_bullets(events_data), end="")
+        else:
+            now = datetime.now(local_tz).replace(tzinfo=None) if args.remaining else None
+            print(render_tables(events_data, remaining_from=now), end="")
+        return 0
 
     # Batch-fetch timezones for all primary contacts
     unique_emails = list({
@@ -1256,6 +1288,24 @@ def main():
     cal_parser.add_argument(
         "--date", "-d",
         help="Start date in YYYY-MM-DD format (default: today)"
+    )
+    cal_parser.add_argument(
+        "--table", action="store_true",
+        help="Print the standard Time/Dur/Subject table(s) with RSVP markers and an Open: line "
+             "instead of JSON (no-RSVP counts as open, tentative as busy, declined is dropped)"
+    )
+    cal_parser.add_argument(
+        "--brief", action="store_true",
+        help="JSON without event bodies (~15 KB for 14 days instead of ~400 KB); keeps attendees "
+             "and response_status for cross-referencing people against meetings"
+    )
+    cal_parser.add_argument(
+        "--bullets", action="store_true",
+        help="Print one bullet per day (for Week-ahead sections) instead of JSON"
+    )
+    cal_parser.add_argument(
+        "--remaining", action="store_true",
+        help="With --table: drop meetings that already ended and start Open: from now"
     )
     cal_parser.set_defaults(func=cmd_calendar)
 
